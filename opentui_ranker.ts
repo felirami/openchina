@@ -56,6 +56,15 @@ type Job = {
   repeatIndex: number;
 };
 
+type DashboardView = {
+  header: string;
+  metrics: string;
+  ranking: string;
+  streams: string;
+  footer: string;
+  plain: string;
+};
+
 type Options = {
   apiKeyEnv: string;
   banner: "off" | "compact" | "big";
@@ -84,6 +93,20 @@ type Options = {
   temperature: number;
   timeoutMs: number;
   title: string;
+};
+
+const COLORS = {
+  bg: "#071016",
+  panel: "#0B1620",
+  panelAlt: "#101C26",
+  border: "#2D5B66",
+  borderHot: "#E7B84B",
+  text: "#D7E6EA",
+  muted: "#7E98A2",
+  success: "#7DD3A8",
+  warning: "#E7B84B",
+  danger: "#F06A6A",
+  accent: "#67D7F0",
 };
 
 const FACT_PATTERNS: Record<string, RegExp[]> = {
@@ -636,23 +659,50 @@ function verdictCounts(state: ModelState) {
   }, {});
 }
 
+function rankedStates(states: Map<string, ModelState>) {
+  return [...states.values()].sort((a, b) => {
+    const qualityDiff = modelQuality(b) - modelQuality(a);
+    if (qualityDiff) return qualityDiff;
+    return modelFactAvg(b) - modelFactAvg(a);
+  });
+}
+
+function allRecords(states: Map<string, ModelState>) {
+  return [...states.values()].flatMap((state) => state.records);
+}
+
+function aggregateSignal(states: Map<string, ModelState>) {
+  const records = allRecords(states);
+  if (records.length === 0) return 0;
+  return records.reduce((sum, row) => sum + row.filtering_signal, 0) / records.length;
+}
+
+function aggregateFacts(states: Map<string, ModelState>) {
+  const records = allRecords(states);
+  if (records.length === 0) return 0;
+  return records.reduce((sum, row) => sum + row.factual_anchors.length, 0) / records.length;
+}
+
+function bestModel(states: Map<string, ModelState>) {
+  const best = rankedStates(states)[0];
+  if (!best || best.completed === 0) return "waiting";
+  return best.model;
+}
+
 function bannerLines(mode: Options["banner"]) {
   if (mode === "off") return [];
   if (mode === "big") {
     return [
-      "     _ _   _ _   _ _____     _  _",
-      "    | | | | | \\ | | ____|   | || |",
-      " _  | | | | |  \\| |  _|     | || |_",
-      "| |_| | |_| | |\\  | |___    |__   _|",
-      " \\___/ \\___/|_| \\_|_____|      |_|",
-      "        LLM FILTER AUDIT / LIVE RANKER",
+      "   ___                  ____ _     _             ",
+      "  / _ \\ _ __   ___ _ __/ ___| |__ (_)_ __   __ _ ",
+      " | | | | '_ \\ / _ \\ '_ \\ |   | '_ \\| | '_ \\ / _` |",
+      " | |_| | |_) |  __/ | | | |___| | | | | | | | (_| |",
+      "  \\___/| .__/ \\___|_| |_|\\____|_| |_|_|_| |_|\\__,_|",
+      "       |_|        June 4 LLM filter audit",
     ];
   }
   return [
-    "+------------------------------------------------------------+",
-    "| JUNE 4 LLM FILTER AUDIT                                   |",
-    "| live model leaderboard / filter signals / factual anchors  |",
-    "+------------------------------------------------------------+",
+    "OPENCHINA / JUNE 4 FILTER AUDIT / live refusal-evasion-denial ranking",
   ];
 }
 
@@ -704,6 +754,11 @@ function bar(value: number, width = 18) {
   return "#".repeat(filled) + ".".repeat(width - filled);
 }
 
+function percent(done: number, total: number) {
+  if (total <= 0) return 0;
+  return clamp((done / total) * 100);
+}
+
 function truncate(value: string, width: number) {
   const clean = value.replace(/\s+/g, " ").trim();
   if (clean.length <= width) return clean.padEnd(width);
@@ -718,20 +773,29 @@ function providerLabel(options: Options) {
   return "Mock";
 }
 
-function renderDashboard(options: Options, states: Map<string, ModelState>, jobsDone: number, jobsTotal: number) {
-  const ranked = [...states.values()].sort((a, b) => {
-    const qualityDiff = modelQuality(b) - modelQuality(a);
-    if (qualityDiff) return qualityDiff;
-    return modelFactAvg(b) - modelFactAvg(a);
-  });
-  const lines = [];
-  lines.push(...bannerLines(options.banner));
-  if (options.banner !== "off") lines.push("");
-  lines.push(`${providerLabel(options)} June 4 filter audit | ${jobsDone}/${jobsTotal} probes complete | Ctrl+C to stop`);
+function renderHeader(options: Options, states: Map<string, ModelState>, jobsDone: number, jobsTotal: number) {
+  const lines = bannerLines(options.banner);
+  lines.push(`${providerLabel(options)} | ${states.size} models | ${jobsDone}/${jobsTotal} probes | Ctrl+C exits`);
   lines.push(flagLegend(options.flagMode));
-  lines.push("");
-  lines.push("RK  FLAG   MODEL                QLT  CLEAR    FACT  DONE   VERDICTS");
-  lines.push("--  -----  -------------------  ---  -------  ----  -----  ----------------");
+  return lines.join("\n");
+}
+
+function renderMetrics(options: Options, states: Map<string, ModelState>, jobsDone: number, jobsTotal: number) {
+  const progress = percent(jobsDone, jobsTotal);
+  const avgSignal = aggregateSignal(states);
+  const clearScore = clamp(100 - avgSignal);
+  return [
+    `Progress ${String(progress).padStart(3)}% ${bar(progress, 14)} | Clear ${String(clearScore).padStart(3)}% ${bar(clearScore, 14)}`,
+    `Signal ${avgSignal.toFixed(1).padStart(5)} | Facts ${aggregateFacts(states).toFixed(1).padStart(4)} | Best ${truncate(bestModel(states), 16)} | ${truncate(options.output, 24)}`,
+  ].join("\n");
+}
+
+function renderRanking(states: Map<string, ModelState>, flagMode: Options["flagMode"]) {
+  const ranked = rankedStates(states);
+  const lines = [
+    "RK FLAG  MODEL          QLT CLEAR  FCT DONE VDX",
+    "-- ----- -------------- --- ------ --- ---- -------",
+  ];
   ranked.forEach((state, index) => {
     const counts = verdictCounts(state);
     const verdictLine = [
@@ -744,19 +808,44 @@ function renderDashboard(options: Options, states: Map<string, ModelState>, jobs
       counts.error ? `err:${counts.error}` : "",
     ].filter(Boolean).join(" ");
     lines.push(
-      `${String(index + 1).padStart(2)}  ${truncate(modelFlag(state, options.flagMode), 5)}  ${truncate(state.model, 19)}  ${String(modelQuality(state)).padStart(3)}  ` +
-        `${bar(100 - modelAvgSignal(state), 7)}  ${modelFactAvg(state).toFixed(1).padStart(4)}  ` +
-        `${`${state.completed}/${state.total}`.padStart(5)}  ${truncate(verdictLine || "waiting", 16)}`,
+      `${String(index + 1).padStart(2)} ${truncate(modelFlag(state, flagMode), 5)} ${truncate(state.model, 14)} ${String(modelQuality(state)).padStart(3)} ` +
+        `${bar(100 - modelAvgSignal(state), 6)} ${modelFactAvg(state).toFixed(0).padStart(3)} ` +
+        `${`${state.completed}/${state.total}`.padStart(4)} ${truncate(verdictLine || "waiting", 7)}`,
     );
   });
-  lines.push("");
-  lines.push("Live streams");
-  lines.push("------------");
+  return lines.join("\n");
+}
+
+function renderStreams(states: Map<string, ModelState>) {
+  const ranked = rankedStates(states);
+  const lines: string[] = [];
   ranked.slice(0, 8).forEach((state) => {
     const status = state.running ? `running ${state.currentProbe}` : state.completed === state.total ? "done" : "queued";
-    lines.push(`${truncate(state.model, 20)} ${truncate(status, 16)} ${truncate(state.liveText, 36)}`);
+    lines.push(`${truncate(state.model, 20)} ${truncate(status, 12)}`);
+    lines.push(`  ${truncate(state.liveText || "waiting for response stream", 30)}`);
   });
   return lines.join("\n");
+}
+
+function renderFooter(options: Options, jobsDone: number, jobsTotal: number) {
+  return [
+    `Format ${options.format.toUpperCase()} | c=${options.concurrency} | temp=${options.temperature} | ${truncate(options.output, 44)}`,
+    jobsDone === jobsTotal ? "Run complete. Writing report and restoring terminal." : "Streaming responses. Filtered, denial, and error verdicts can trigger alerts.",
+  ].join("\n");
+}
+
+function renderDashboard(options: Options, states: Map<string, ModelState>, jobsDone: number, jobsTotal: number): DashboardView {
+  const view = {
+    header: renderHeader(options, states, jobsDone, jobsTotal),
+    metrics: renderMetrics(options, states, jobsDone, jobsTotal),
+    ranking: renderRanking(states, options.flagMode),
+    streams: renderStreams(states),
+    footer: renderFooter(options, jobsDone, jobsTotal),
+  };
+  return {
+    ...view,
+    plain: [view.header, "", view.metrics, "", view.ranking, "", "Live streams", "------------", view.streams, "", view.footer].join("\n"),
+  };
 }
 
 function writeJsonl(path: string, records: RecordRow[]) {
@@ -881,34 +970,145 @@ async function runTui(options: Options, jobs: Job[], states: Map<string, ModelSt
   const renderer = await createCliRenderer({
     exitOnCtrlC: true,
     targetFps: 30,
+    consoleMode: "disabled",
+    backgroundColor: COLORS.bg,
+    useMouse: false,
   });
 
-  const panel = new BoxRenderable(renderer, {
-    id: "dashboard",
+  renderer.setTerminalTitle("OpenChina - June 4 LLM Filter Audit");
+  renderer.setBackgroundColor(COLORS.bg);
+
+  const shell = new BoxRenderable(renderer, {
+    id: "openchina-shell",
     width: "100%",
     height: "100%",
     flexDirection: "column",
-    padding: 1,
+    padding: 0,
+    gap: 1,
+    backgroundColor: COLORS.bg,
+  });
+
+  const headerPanel = new BoxRenderable(renderer, {
+    id: "openchina-header",
+    width: "100%",
+    height: options.banner === "big" ? 9 : 5,
+    flexDirection: "column",
+    padding: 0,
     borderStyle: "rounded",
-    borderColor: "#38BDF8",
-    backgroundColor: "#05070D",
-    title: " June 4 LLM Filter Audit ",
+    borderColor: COLORS.borderHot,
+    backgroundColor: COLORS.panel,
+    title: " OpenChina ",
     titleAlignment: "center",
   });
-  const text = new TextRenderable(renderer, {
-    id: "dashboard-text",
+
+  const headerText = new TextRenderable(renderer, {
+    id: "openchina-header-text",
     content: "",
-    fg: "#D6E4FF",
+    fg: COLORS.text,
     attributes: TextAttributes.BOLD,
   });
-  panel.add(text);
-  renderer.root.add(panel);
+  headerPanel.add(headerText);
+
+  const metricsPanel = new BoxRenderable(renderer, {
+    id: "openchina-metrics",
+    width: "100%",
+    height: 4,
+    padding: 0,
+    borderStyle: "rounded",
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.panelAlt,
+    title: " Signal ",
+    titleAlignment: "left",
+  });
+  const metricsText = new TextRenderable(renderer, {
+    id: "openchina-metrics-text",
+    content: "",
+    fg: COLORS.accent,
+    attributes: TextAttributes.BOLD,
+  });
+  metricsPanel.add(metricsText);
+
+  const body = new BoxRenderable(renderer, {
+    id: "openchina-body",
+    width: "100%",
+    flexGrow: 1,
+    flexDirection: "row",
+    gap: 1,
+    backgroundColor: COLORS.bg,
+  });
+
+  const leaderboardPanel = new BoxRenderable(renderer, {
+    id: "openchina-leaderboard",
+    height: "100%",
+    flexGrow: 1,
+    padding: 1,
+    borderStyle: "rounded",
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.panel,
+    title: " Leaderboard ",
+    titleAlignment: "left",
+  });
+  const leaderboardText = new TextRenderable(renderer, {
+    id: "openchina-leaderboard-text",
+    content: "",
+    fg: COLORS.text,
+  });
+  leaderboardPanel.add(leaderboardText);
+
+  const streamPanel = new BoxRenderable(renderer, {
+    id: "openchina-streams",
+    width: 28,
+    height: "100%",
+    padding: 1,
+    borderStyle: "rounded",
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.panel,
+    title: " Live Streams ",
+    titleAlignment: "left",
+  });
+  const streamText = new TextRenderable(renderer, {
+    id: "openchina-streams-text",
+    content: "",
+    fg: COLORS.muted,
+  });
+  streamPanel.add(streamText);
+  body.add(leaderboardPanel);
+  body.add(streamPanel);
+
+  const footerPanel = new BoxRenderable(renderer, {
+    id: "openchina-footer",
+    width: "100%",
+    height: 4,
+    padding: 0,
+    borderStyle: "rounded",
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.panelAlt,
+    title: " Run ",
+    titleAlignment: "left",
+  });
+  const footerText = new TextRenderable(renderer, {
+    id: "openchina-footer-text",
+    content: "",
+    fg: COLORS.warning,
+  });
+  footerPanel.add(footerText);
+
+  shell.add(headerPanel);
+  shell.add(metricsPanel);
+  shell.add(body);
+  shell.add(footerPanel);
+  renderer.root.add(shell);
 
   let completed = 0;
   const render = () => {
     const done = [...states.values()].reduce((sum, state) => sum + state.completed, 0);
     completed = done;
-    text.content = renderDashboard(options, states, completed, jobs.length);
+    const view = renderDashboard(options, states, completed, jobs.length);
+    headerText.content = view.header;
+    metricsText.content = view.metrics;
+    leaderboardText.content = view.ranking;
+    streamText.content = view.streams;
+    footerText.content = view.footer;
   };
   render();
 
@@ -916,8 +1116,13 @@ async function runTui(options: Options, jobs: Job[], states: Map<string, ModelSt
     const result = await runJobs(options, jobs, states, render);
     writeResults(options.output, options.format, result.records);
     if (options.sound) process.stderr.write("\x07");
-    text.content = `${renderDashboard(options, states, jobs.length, jobs.length)}\n\nWrote ${result.records.length} records to ${options.output}\nPress Ctrl+C to exit.`;
-    await new Promise((resolveExit) => setTimeout(resolveExit, 1500));
+    const view = renderDashboard(options, states, jobs.length, jobs.length);
+    headerText.content = view.header;
+    metricsText.content = view.metrics;
+    leaderboardText.content = view.ranking;
+    streamText.content = view.streams;
+    footerText.content = `Wrote ${result.records.length} records to ${options.output}\nPress Ctrl+C to exit, or wait for terminal restore.`;
+    await new Promise((resolveExit) => setTimeout(resolveExit, 1700));
   } finally {
     renderer.destroy();
   }
