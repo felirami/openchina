@@ -4,7 +4,7 @@
   "description": "OpenTUI terminal audit for LLM filtering around June 4, 1989 and CCP-sensitive China prompts.",
   "type": "module",
   "bin": {
-    "openchina": "./bin/openchina"
+    "openchina": "bin/openchina"
   },
   "files": [
     "bin",
