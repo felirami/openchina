@@ -9,62 +9,12 @@ The tool detects response behavior. It does not prove why the behavior happened 
 
 NPM: [openchina](https://www.npmjs.com/package/openchina)
 
-## Quick Start
-
-List the probes:
-
-```bash
-python3 llm_filter_audit.py --list-probes
-```
-
-Run the built-in mock provider to verify the harness:
-
-```bash
-python3 llm_filter_audit.py --provider mock --mock-style mixed --format md
-```
-
-Run an OpenAI-compatible chat completions API:
-
-```bash
-OPENAI_API_KEY=... python3 llm_filter_audit.py \
-  --provider openai \
-  --model gpt-4.1-mini \
-  --format jsonl
-```
-
-Run OpenRouter with an OpenRouter API key:
-
-```bash
-OPENROUTER_API_KEY=... python3 llm_filter_audit.py \
-  --provider openrouter \
-  --model openai/gpt-4.1-mini \
-  --format md
-```
-
-Use another OpenAI-compatible endpoint:
-
-```bash
-OPENAI_API_KEY=... OPENAI_BASE_URL=https://api.example.com/v1 python3 llm_filter_audit.py \
-  --provider openai \
-  --model model-name
-```
-
-Run a local Ollama model:
-
-```bash
-python3 llm_filter_audit.py \
-  --provider ollama \
-  --model llama3.1 \
-  --format md
-```
-
-## Live OpenTUI Ranking
+## Install
 
 Install from npm:
 
 ```bash
 npm install -g openchina
-openchina setup
 openchina
 ```
 
@@ -74,43 +24,99 @@ Or try it without installing globally:
 npx openchina mock
 ```
 
-OpenChina is a Bun-powered terminal app. Install Bun first if `openchina` cannot find it:
+OpenChina is a Bun-powered terminal app. Install Bun first if the command cannot find it:
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
 ```
 
-Install the Bun dependencies once:
+## Terminal Workflow
+
+Run:
 
 ```bash
-bun install
-```
-
-Install the `openchina` command locally:
-
-```bash
-bun run install:local
-```
-
-Then run the whole workflow from your terminal:
-
-```bash
-openchina setup
 openchina
 ```
 
-`openchina setup` saves your OpenRouter API key to `~/.config/openchina/env` with file mode `600`. You can also skip setup and just run `openchina`; it will prompt for the key if it cannot find one. `OPENROUTER_API_KEY` in your shell always wins.
+The guided flow opens with a red/yellow OpenChina ASCII flag splash and optional generated pentatonic intro audio on macOS. Then it walks the user through:
 
-Try the installed command without spending API credits:
+1. Pick an AI API provider.
+2. Pick or edit the model roster.
+3. Pick a censorship test suite.
+4. Choose flag markers, banner size, and alert sounds.
+5. Watch the OpenTUI leaderboard rank models in real time.
+
+Supported providers:
+
+| Provider | What it uses | Key |
+| --- | --- | --- |
+| OpenRouter | Hosted multi-model OpenAI-compatible API | `OPENROUTER_API_KEY` |
+| OpenAI API | `https://api.openai.com/v1/chat/completions` | `OPENAI_API_KEY` |
+| OpenAI-compatible | Groq, Together, DeepSeek, Fireworks, local gateways, etc. | Any env var you choose |
+| Ollama local | `http://localhost:11434/api/chat` | No API key |
+| Mock demo | Deterministic built-in responses | No API key |
+
+Bundled test suites:
+
+| Suite | Focus |
+| --- | --- |
+| Quick signal check | Four broad prompts for a fast first read |
+| Full June 4 suite | Every bundled English and Chinese probe |
+| Chinese-language probes | Simplified Chinese prompts about June 4 |
+| CCP censorship treatment | PRC/CCP censorship and sensitivity prompts |
+| Direct massacre questions | Plain direct prompts that make evasion easy to spot |
+| Official narrative comparison | Official framing versus historians and survivor accounts |
+
+## Live OpenTUI Ranking
+
+Try the live UI without spending API credits:
 
 ```bash
 openchina mock
 ```
 
+Save an API key for later:
+
+```bash
+openchina setup
+```
+
+Keys in your shell always win. Saved keys go to `~/.config/openchina/env` with file mode `600`. Set `OPENCHINA_ENV_FILE` to use another path.
+
 Run a custom OpenRouter model roster:
 
 ```bash
 openchina --models openai/gpt-4.1-mini,anthropic/claude-sonnet-4,deepseek/deepseek-chat,qwen/qwen3-32b
+```
+
+Run OpenAI:
+
+```bash
+openchina --provider openai --model gpt-4.1-mini
+```
+
+Run another OpenAI-compatible API:
+
+```bash
+OPENCHINA_API_KEY=... openchina \
+  --provider openai \
+  --base-url https://api.example.com/v1 \
+  --api-key-env OPENCHINA_API_KEY \
+  --model model-name
+```
+
+Run local Ollama:
+
+```bash
+openchina --provider ollama --models llama3.1,qwen2.5
+```
+
+Pick tests directly:
+
+```bash
+openchina --select chinese
+openchina --select direct
+openchina --select censorship --select ccp
 ```
 
 Run the OpenTUI dashboard against OpenRouter models:
@@ -127,18 +133,12 @@ OPENROUTER_API_KEY=... bun run tui -- \
 
 Replace those model IDs with any model IDs available in your OpenRouter account.
 
-Try the live dashboard without spending API credits:
-
-```bash
-bun run tui:mock
-```
-
 The live ranker streams response snippets as calls run and continuously ranks models by a `quality` score. Higher quality means lower filtering signal, more factual anchors, and fewer errors.
 
 Add terminal visuals and alert sounds:
 
 ```bash
-bun run tui:mock -- --banner big --flag-mode ascii --sound
+openchina mock --banner big --flag-mode ascii --sound
 ```
 
 `--banner compact` is the default. `--banner big` looks best in a taller terminal window.
@@ -156,13 +156,29 @@ Flag meanings in the dashboard:
 Use Unicode flag glyphs if your terminal renders them well:
 
 ```bash
-bun run tui:mock -- --flag-mode unicode
+openchina mock --flag-mode unicode
 ```
 
 Headless smoke test:
 
 ```bash
-bun run opentui_ranker.ts --mock --headless --models demo/substantive,demo/filtered,demo/denial
+bun run opentui_ranker.ts --provider mock --headless --models demo/substantive,demo/filtered,demo/denial
+```
+
+## Python Harness
+
+The repo also includes a transparent Python harness for simple batch runs and command-based local model testing.
+
+List the probes:
+
+```bash
+python3 llm_filter_audit.py --list-probes
+```
+
+Run the built-in mock provider:
+
+```bash
+python3 llm_filter_audit.py --provider mock --mock-style mixed --format md
 ```
 
 Run any shell command that prints a response to stdout:

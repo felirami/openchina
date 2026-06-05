@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { chmod } from "node:fs/promises";
-import { homedir } from "node:os";
+import { createInterface } from "node:readline/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -9,16 +10,58 @@ import { spawn } from "node:child_process";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG_PATH = process.env.OPENCHINA_ENV_FILE ?? resolve(process.env.XDG_CONFIG_HOME ?? resolve(homedir(), ".config"), "openchina", "env");
 const RANKER_PATH = resolve(ROOT, "opentui_ranker.ts");
-const DEFAULT_MODELS = [
+const DEFAULT_OPENROUTER_MODELS = [
   "openai/gpt-4.1-mini",
   "anthropic/claude-sonnet-4",
   "google/gemini-2.5-flash",
   "deepseek/deepseek-chat",
   "qwen/qwen3-32b",
 ];
+const DEFAULT_OPENAI_MODELS = ["gpt-4.1-mini", "gpt-4.1"];
+const DEFAULT_OLLAMA_MODELS = ["llama3.1", "qwen2.5"];
+const DEFAULT_MOCK_MODELS = ["demo/substantive", "demo/filtered", "demo/denial"];
+
+const TEST_SUITES = [
+  {
+    key: "quick",
+    label: "Quick signal check",
+    description: "Four broad prompts for a fast first read.",
+    args: ["--max-probes", "4"],
+  },
+  {
+    key: "full",
+    label: "Full June 4 suite",
+    description: "Every bundled English and Chinese probe.",
+    args: [],
+  },
+  {
+    key: "chinese",
+    label: "Chinese-language probes",
+    description: "Simplified Chinese prompts about June 4.",
+    args: ["--select", "chinese"],
+  },
+  {
+    key: "ccp",
+    label: "CCP censorship treatment",
+    description: "Prompts focused on PRC/CCP censorship and sensitivity.",
+    args: ["--select", "censorship", "--select", "ccp"],
+  },
+  {
+    key: "direct",
+    label: "Direct massacre questions",
+    description: "Plain direct prompts that make evasion easy to spot.",
+    args: ["--select", "direct"],
+  },
+  {
+    key: "narrative",
+    label: "Official narrative comparison",
+    description: "Compares official framing against historians and survivor accounts.",
+    args: ["--select", "compare_accounts_en"],
+  },
+] as const;
 
 type Parsed = {
-  command: "run" | "setup" | "mock" | "help";
+  command: "run" | "setup" | "mock" | "wizard" | "help";
   passthrough: string[];
   saveKey: boolean;
   resetKey: boolean;
@@ -28,25 +71,34 @@ function printHelp() {
   console.log(`openchina - OpenTUI LLM censorship/filter audit for June 4, 1989
 
 Usage:
-  openchina                  Prompt for an OpenRouter key if needed, then launch the live TUI.
-  openchina setup            Save or replace the local OpenRouter API key.
+  openchina                  Launch the guided provider/test picker.
+  openchina wizard           Launch the guided provider/test picker.
+  openchina setup            Save or replace an API key.
   openchina mock             Launch the OpenTUI demo without API credits.
+  openchina --provider ...   Skip the wizard and run directly.
   openchina --models A,B,C   Run a custom OpenRouter model roster.
 
 Examples:
   openchina
+  openchina wizard
   openchina --sound --banner big
+  openchina --provider openai --model gpt-4.1-mini
+  openchina --provider ollama --models llama3.1,qwen2.5
   openchina --models openai/gpt-4.1-mini,deepseek/deepseek-chat,qwen/qwen3-32b
   openchina mock --flag-mode unicode
 
 Key storage:
-  OPENROUTER_API_KEY in your shell always wins.
+  API keys in your shell always win.
   Otherwise openchina can save the key to ${CONFIG_PATH}.
   Set OPENCHINA_ENV_FILE to override that path.
 
 Common options passed through to the OpenTUI runner:
+  --provider NAME    openrouter, openai, ollama, or mock.
   --model NAME       Add one model. Repeatable.
   --models A,B,C     Add comma-separated models.
+  --base-url URL     OpenAI-compatible chat completions base URL.
+  --api-key-env NAME API key environment variable.
+  --select ID|TAG    Pick tests by prompt id, tag, or language.
   --max-probes N     Limit the test prompt count. Default: 4.
   --concurrency N    Parallel calls. Default: 3.
   --banner MODE      off, compact, or big. Default: compact.
@@ -69,6 +121,7 @@ function parseArgs(argv: string[]): Parsed {
   for (const arg of argv) {
     if (arg === "setup") command = "setup";
     else if (arg === "mock") command = "mock";
+    else if (arg === "wizard") command = "wizard";
     else if (arg === "--help" || arg === "-h") command = "help";
     else if (arg === "--runner-help") passthrough.push("--help");
     else if (arg === "--no-save-key") saveKey = false;
@@ -79,11 +132,20 @@ function parseArgs(argv: string[]): Parsed {
   return { command, passthrough, saveKey, resetKey };
 }
 
-function readSavedKey() {
-  if (!existsSync(CONFIG_PATH)) return "";
+function readSavedConfig() {
+  const values = new Map<string, string>();
+  if (!existsSync(CONFIG_PATH)) return values;
   const body = readFileSync(CONFIG_PATH, "utf8");
-  const match = body.match(/^OPENROUTER_API_KEY=(.+)$/m);
-  return match?.[1]?.trim() ?? "";
+  for (const line of body.split(/\r?\n/)) {
+    const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
+    if (match) values.set(match[1], match[2].trim());
+  }
+  return values;
+}
+
+function readSavedKey(name: string) {
+  const config = readSavedConfig();
+  return config.get(name) ?? "";
 }
 
 async function askHidden(question: string) {
@@ -141,33 +203,150 @@ async function askVisible(question: string) {
   return value.trim();
 }
 
-async function saveKey(key: string) {
+async function askLine(question: string, fallback = "") {
+  if (!process.stdin.isTTY) return fallback;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question(question);
+    return answer.trim() || fallback;
+  } finally {
+    rl.close();
+  }
+}
+
+async function askYesNo(question: string, fallback: boolean) {
+  const suffix = fallback ? " [Y/n] " : " [y/N] ";
+  const answer = (await askLine(`${question}${suffix}`, fallback ? "y" : "n")).toLowerCase();
+  return answer.startsWith("y");
+}
+
+async function askChoice(title: string, choices: Array<{ label: string; description?: string }>, fallbackIndex = 0) {
+  console.log(`\n${title}`);
+  choices.forEach((choice, index) => {
+    const detail = choice.description ? ` - ${choice.description}` : "";
+    console.log(`  ${index + 1}. ${choice.label}${detail}`);
+  });
+  const answer = await askLine(`Choose ${fallbackIndex + 1}: `, String(fallbackIndex + 1));
+  const index = Number(answer) - 1;
+  if (!Number.isInteger(index) || index < 0 || index >= choices.length) return fallbackIndex;
+  return index;
+}
+
+function showSplash() {
+  const red = "\x1b[31m";
+  const yellow = "\x1b[33m";
+  const cyan = "\x1b[36m";
+  const reset = "\x1b[0m";
+  console.log(`${red}
+  +------------------------------------------------+
+  |  *     * * * *        O P E N C H I N A       |
+  |    *       *           J U N E  4  A U D I T  |
+  |  *     * * * *        live terminal ranking   |
+  +------------------------------------------------+${reset}`);
+  console.log(`${yellow}                 ★  🇨🇳  OpenChina${reset}`);
+  console.log(`${cyan}        Terminal LLM censorship tests for June 4, 1989${reset}\n`);
+}
+
+function writeWav(path: string, notes: Array<{ freq: number; seconds: number }>) {
+  const sampleRate = 22050;
+  const samples: number[] = [];
+  for (const note of notes) {
+    const count = Math.floor(sampleRate * note.seconds);
+    for (let i = 0; i < count; i += 1) {
+      const t = i / sampleRate;
+      const envelope = Math.min(1, i / 900, (count - i) / 1400);
+      samples.push(Math.sin(2 * Math.PI * note.freq * t) * envelope * 0.22);
+    }
+  }
+  const dataSize = samples.length * 2;
+  const buffer = Buffer.alloc(44 + dataSize);
+  buffer.write("RIFF", 0);
+  buffer.writeUInt32LE(36 + dataSize, 4);
+  buffer.write("WAVEfmt ", 8);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(1, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * 2, 28);
+  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write("data", 36);
+  buffer.writeUInt32LE(dataSize, 40);
+  samples.forEach((sample, index) => {
+    buffer.writeInt16LE(Math.round(Math.max(-1, Math.min(1, sample)) * 32767), 44 + index * 2);
+  });
+  writeFileSync(path, buffer);
+}
+
+function startMusic() {
+  if (process.env.OPENCHINA_NO_MUSIC === "1") return () => undefined;
+  if (process.platform === "darwin") {
+    const path = resolve(tmpdir(), `openchina-${Date.now()}.wav`);
+    writeWav(path, [
+      { freq: 392, seconds: 0.22 },
+      { freq: 440, seconds: 0.22 },
+      { freq: 523.25, seconds: 0.26 },
+      { freq: 587.33, seconds: 0.26 },
+      { freq: 659.25, seconds: 0.34 },
+      { freq: 587.33, seconds: 0.22 },
+      { freq: 523.25, seconds: 0.26 },
+      { freq: 440, seconds: 0.42 },
+    ]);
+    let stopped = false;
+    let child: ReturnType<typeof spawn> | undefined;
+    const play = () => {
+      if (stopped) return;
+      child = spawn("afplay", [path], { stdio: "ignore" });
+      child.on("exit", () => {
+        if (!stopped) setTimeout(play, 120);
+      });
+    };
+    play();
+    return () => {
+      stopped = true;
+      child?.kill();
+      try {
+        unlinkSync(path);
+      } catch {
+        // Temporary intro audio cleanup is best-effort.
+      }
+    };
+  }
+
+  const interval = setInterval(() => process.stderr.write("\x07"), 900);
+  return () => clearInterval(interval);
+}
+
+async function saveKey(name: string, key: string) {
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });
-  writeFileSync(CONFIG_PATH, `OPENROUTER_API_KEY=${key}\n`, "utf8");
+  const config = readSavedConfig();
+  config.set(name, key);
+  const body = [...config.entries()].map(([envName, value]) => `${envName}=${value}`).join("\n") + "\n";
+  writeFileSync(CONFIG_PATH, body, "utf8");
   await chmod(CONFIG_PATH, 0o600);
 }
 
-async function ensureApiKey(saveByDefault: boolean) {
-  if (process.env.OPENROUTER_API_KEY) return process.env.OPENROUTER_API_KEY;
+async function ensureApiKey(envName: string, label: string, saveByDefault: boolean) {
+  if (process.env[envName]) return process.env[envName];
 
-  const saved = readSavedKey();
+  const saved = readSavedKey(envName);
   if (saved) {
-    process.env.OPENROUTER_API_KEY = saved;
+    process.env[envName] = saved;
     return saved;
   }
 
-  const key = await askHidden("OpenRouter API key: ");
-  if (!key) throw new Error("No OpenRouter API key entered.");
+  const key = await askHidden(`${label} API key: `);
+  if (!key) throw new Error(`No ${label} API key entered.`);
 
   if (saveByDefault) {
     const answer = await askVisible(`Save key locally to ${CONFIG_PATH}? [Y/n] `);
     if (!answer || answer.toLowerCase().startsWith("y")) {
-      await saveKey(key);
+      await saveKey(envName, key);
       console.log("Saved key locally with file mode 600.");
     }
   }
 
-  process.env.OPENROUTER_API_KEY = key;
+  process.env[envName] = key;
   return key;
 }
 
@@ -181,13 +360,117 @@ function hasOption(args: string[], name: string) {
 
 function defaultedArgs(args: string[]) {
   const result = [...args];
-  if (!hasAnyModelArg(result)) result.push("--models", DEFAULT_MODELS.join(","));
+  if (!hasOption(result, "--provider") && !result.includes("--mock")) result.push("--provider", "openrouter");
+  const provider = providerFromArgs(result) || "openrouter";
+  if (!hasAnyModelArg(result)) result.push("--models", selectedModelsForProvider(provider).join(","));
   if (!hasOption(result, "--max-probes")) result.push("--max-probes", "4");
   if (!hasOption(result, "--concurrency")) result.push("--concurrency", "3");
   if (!hasOption(result, "--format")) result.push("--format", "md");
   if (!hasOption(result, "--banner")) result.push("--banner", "compact");
   if (!hasOption(result, "--flag-mode")) result.push("--flag-mode", "ascii");
   return result;
+}
+
+function providerFromArgs(args: string[]) {
+  if (args.includes("--mock")) return "mock";
+  const index = args.indexOf("--provider");
+  if (index >= 0) return args[index + 1] ?? "";
+  const inline = args.find((arg) => arg.startsWith("--provider="));
+  return inline?.split("=", 2)[1] ?? "";
+}
+
+function apiEnvFromArgs(args: string[]) {
+  const index = args.indexOf("--api-key-env");
+  if (index >= 0) return args[index + 1] ?? "";
+  const inline = args.find((arg) => arg.startsWith("--api-key-env="));
+  return inline?.split("=", 2)[1] ?? "";
+}
+
+function selectedModelsForProvider(provider: string) {
+  if (provider === "openai") return DEFAULT_OPENAI_MODELS;
+  if (provider === "ollama") return DEFAULT_OLLAMA_MODELS;
+  if (provider === "mock") return DEFAULT_MOCK_MODELS;
+  return DEFAULT_OPENROUTER_MODELS;
+}
+
+async function setupProviderKey(provider: string, args: string[], saveKey: boolean) {
+  if (provider === "mock" || provider === "ollama") return;
+  const envName = apiEnvFromArgs(args) || (provider === "openai" ? "OPENAI_API_KEY" : "OPENROUTER_API_KEY");
+  const label = provider === "openai" ? "OpenAI-compatible" : "OpenRouter";
+  await ensureApiKey(envName, label, saveKey);
+}
+
+async function guidedFlow(saveKey: boolean) {
+  showSplash();
+  console.log("OpenChina will walk you through three choices:");
+  console.log("  1. Which AI API to use");
+  console.log("  2. Which models to compare");
+  console.log("  3. Which censorship test suite to run");
+
+  const music = await askYesNo("Play a short pentatonic terminal intro while we set this up?", true);
+  const stopMusic = music ? startMusic() : () => undefined;
+
+  try {
+    const providerChoices = [
+      { label: "OpenRouter", description: "One key, many hosted models. Recommended." },
+      { label: "OpenAI API", description: "OpenAI chat completions endpoint." },
+      { label: "OpenAI-compatible API", description: "Groq, Together, DeepSeek, Fireworks, local gateways, etc." },
+      { label: "Ollama local", description: "Run local models through http://localhost:11434." },
+      { label: "Mock demo", description: "No API key, no credits, shows the UX." },
+    ];
+    const providerIndex = await askChoice("Choose an AI API provider", providerChoices, 0);
+    const args: string[] = [];
+    let defaultModels = DEFAULT_OPENROUTER_MODELS;
+
+    if (providerIndex === 0) {
+      args.push("--provider", "openrouter");
+      defaultModels = DEFAULT_OPENROUTER_MODELS;
+      await ensureApiKey("OPENROUTER_API_KEY", "OpenRouter", saveKey);
+    } else if (providerIndex === 1) {
+      args.push("--provider", "openai");
+      defaultModels = DEFAULT_OPENAI_MODELS;
+      await ensureApiKey("OPENAI_API_KEY", "OpenAI", saveKey);
+    } else if (providerIndex === 2) {
+      args.push("--provider", "openai");
+      const baseUrl = await askLine("OpenAI-compatible base URL [https://api.openai.com/v1]: ", "https://api.openai.com/v1");
+      const envName = await askLine("Environment variable for this API key [OPENCHINA_API_KEY]: ", "OPENCHINA_API_KEY");
+      args.push("--base-url", baseUrl, "--api-key-env", envName);
+      defaultModels = ["model-name"];
+      await ensureApiKey(envName, "OpenAI-compatible", saveKey);
+    } else if (providerIndex === 3) {
+      args.push("--provider", "ollama");
+      const ollamaUrl = await askLine("Ollama URL [http://localhost:11434]: ", "http://localhost:11434");
+      args.push("--ollama-url", ollamaUrl);
+      defaultModels = DEFAULT_OLLAMA_MODELS;
+    } else {
+      args.push("--provider", "mock");
+      defaultModels = DEFAULT_MOCK_MODELS;
+    }
+
+    const modelAnswer = await askLine(`Models, comma-separated [${defaultModels.join(",")}]: `, defaultModels.join(","));
+    args.push("--models", modelAnswer);
+
+    const suiteChoices = TEST_SUITES.map((suite) => ({ label: suite.label, description: suite.description }));
+    const suiteIndex = await askChoice("Pick a censorship test suite", suiteChoices, 0);
+    args.push(...TEST_SUITES[suiteIndex].args);
+
+    const flagMode = await askYesNo("Use Chinese-flag markers in the live leaderboard?", true) ? "unicode" : "ascii";
+    const bigBanner = await askYesNo("Use the big OpenChina ASCII banner?", false);
+    const alertSounds = await askYesNo("Ring alert sounds when a model is filtered or denial/revisionist?", false);
+    args.push("--flag-mode", flagMode, "--banner", bigBanner ? "big" : "compact");
+    if (alertSounds) args.push("--sound");
+
+    if (!hasOption(args, "--concurrency")) args.push("--concurrency", "3");
+    if (!hasOption(args, "--format")) args.push("--format", "md");
+
+    console.log("\nLaunching OpenChina...");
+    console.log(`openchina ${args.join(" ")}`);
+    stopMusic();
+    return args;
+  } catch (error) {
+    stopMusic();
+    throw error;
+  }
 }
 
 async function runRanker(args: string[], env: NodeJS.ProcessEnv) {
@@ -225,22 +508,40 @@ async function main() {
   }
 
   if (parsed.command === "setup") {
-    const key = await askHidden("OpenRouter API key: ");
-    if (!key) throw new Error("No OpenRouter API key entered.");
-    await saveKey(key);
+    const providerIndex = await askChoice("Which API key do you want to save?", [
+      { label: "OpenRouter", description: "OPENROUTER_API_KEY" },
+      { label: "OpenAI", description: "OPENAI_API_KEY" },
+      { label: "OpenAI-compatible custom", description: "OPENCHINA_API_KEY or a name you choose" },
+    ], 0);
+    const envName = providerIndex === 0
+      ? "OPENROUTER_API_KEY"
+      : providerIndex === 1
+        ? "OPENAI_API_KEY"
+        : await askLine("Environment variable name [OPENCHINA_API_KEY]: ", "OPENCHINA_API_KEY");
+    const key = await askHidden(`${envName}: `);
+    if (!key) throw new Error("No API key entered.");
+    await saveKey(envName, key);
     console.log(`Saved ${CONFIG_PATH}`);
     return;
   }
 
   if (parsed.command === "mock") {
-    const args = ["--mock", ...parsed.passthrough];
+    const args = ["--provider", "mock", ...parsed.passthrough];
     const code = await runRanker(args, process.env);
     process.exitCode = code;
     return;
   }
 
-  await ensureApiKey(parsed.saveKey);
+  if ((parsed.command === "wizard" || parsed.passthrough.length === 0) && process.stdin.isTTY) {
+    const args = await guidedFlow(parsed.saveKey);
+    const code = await runRanker(args, process.env);
+    process.exitCode = code;
+    return;
+  }
+
   const args = defaultedArgs(parsed.passthrough);
+  const provider = providerFromArgs(args) || "openrouter";
+  await setupProviderKey(provider, args, parsed.saveKey);
   const code = await runRanker(args, process.env);
   process.exitCode = code;
 }

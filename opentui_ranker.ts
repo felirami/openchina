@@ -60,6 +60,7 @@ type Options = {
   apiKeyEnv: string;
   banner: "off" | "compact" | "big";
   baseUrl: string;
+  baseUrlProvided: boolean;
   commandHelp: boolean;
   concurrency: number;
   delayMs: number;
@@ -71,7 +72,9 @@ type Options = {
   mock: boolean;
   models: string[];
   noStream: boolean;
+  ollamaUrl: string;
   output: string;
+  provider: "openrouter" | "openai" | "ollama" | "mock";
   probesPath: string;
   referer: string;
   repeat: number;
@@ -159,7 +162,8 @@ function parseArgs(argv: string[]): Options {
   const options: Options = {
     apiKeyEnv: "OPENROUTER_API_KEY",
     banner: "compact",
-    baseUrl: process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
+    baseUrl: "",
+    baseUrlProvided: false,
     commandHelp: false,
     concurrency: 3,
     delayMs: 0,
@@ -171,7 +175,9 @@ function parseArgs(argv: string[]): Options {
     mock: false,
     models: [],
     noStream: false,
-    output: `results/openrouter-tui-${stamp}.jsonl`,
+    ollamaUrl: process.env.OLLAMA_URL ?? "http://localhost:11434",
+    output: `results/openchina-tui-${stamp}.jsonl`,
+    provider: "openrouter",
     probesPath: "prompts/tiananmen_june4_1989.json",
     referer: process.env.OPENROUTER_HTTP_REFERER ?? "",
     repeat: 1,
@@ -194,7 +200,10 @@ function parseArgs(argv: string[]): Options {
     if (arg === "--help" || arg === "-h") options.commandHelp = true;
     else if (arg === "--api-key-env") options.apiKeyEnv = next();
     else if (arg === "--banner") options.banner = next() as Options["banner"];
-    else if (arg === "--base-url") options.baseUrl = next();
+    else if (arg === "--base-url") {
+      options.baseUrl = next();
+      options.baseUrlProvided = true;
+    }
     else if (arg === "--concurrency") options.concurrency = Number(next());
     else if (arg === "--delay") options.delayMs = Number(next()) * 1000;
     else if (arg === "--flag-mode") options.flagMode = next() as Options["flagMode"];
@@ -206,7 +215,9 @@ function parseArgs(argv: string[]): Options {
     else if (arg === "--model") options.models.push(next());
     else if (arg === "--models") options.models.push(...next().split(",").map((model) => model.trim()).filter(Boolean));
     else if (arg === "--no-stream") options.noStream = true;
+    else if (arg === "--ollama-url") options.ollamaUrl = next();
     else if (arg === "--output") options.output = next();
+    else if (arg === "--provider") options.provider = next() as Options["provider"];
     else if (arg === "--probes") options.probesPath = next();
     else if (arg === "--referer") options.referer = next();
     else if (arg === "--repeat") options.repeat = Number(next());
@@ -223,20 +234,37 @@ function parseArgs(argv: string[]): Options {
   if (!Number.isFinite(options.repeat) || options.repeat < 1) options.repeat = 1;
   if (!["off", "compact", "big"].includes(options.banner)) throw new Error("--banner must be off, compact, or big");
   if (!["off", "ascii", "unicode"].includes(options.flagMode)) throw new Error("--flag-mode must be off, ascii, or unicode");
+  if (!["openrouter", "openai", "ollama", "mock"].includes(options.provider)) {
+    throw new Error("--provider must be openrouter, openai, ollama, or mock");
+  }
   if (!["jsonl", "md"].includes(options.format)) throw new Error("--format must be jsonl or md");
+  if (options.mock) options.provider = "mock";
+  if (!options.baseUrlProvided) {
+    if (options.provider === "openrouter") options.baseUrl = process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1";
+    if (options.provider === "openai") options.baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  }
+  if (options.provider === "openai" && options.apiKeyEnv === "OPENROUTER_API_KEY") {
+    options.apiKeyEnv = "OPENAI_API_KEY";
+  }
   return options;
 }
 
 function usage() {
-  console.log(`OpenTUI OpenRouter live ranker
+  console.log(`OpenChina OpenTUI live ranker
 
 Usage:
   OPENROUTER_API_KEY=... bun run tui -- --model openai/gpt-4.1-mini --model anthropic/claude-sonnet-4
+  OPENAI_API_KEY=... bun run tui -- --provider openai --model gpt-4.1-mini
+  bun run tui -- --provider ollama --model llama3.1
   bun run tui:mock
 
 Options:
-  --model NAME          Add one OpenRouter model. Repeatable.
+  --provider NAME       openrouter, openai, ollama, or mock. Default: openrouter.
+  --model NAME          Add one model. Repeatable.
   --models A,B,C        Add comma-separated models.
+  --base-url URL        OpenAI-compatible chat completions base URL.
+  --api-key-env NAME    API key environment variable for OpenRouter/OpenAI-compatible APIs.
+  --ollama-url URL      Ollama server URL. Default: http://localhost:11434.
   --select ID|TAG       Include probes by id, tag, or language. Repeatable.
   --max-probes N        Limit selected probes.
   --repeat N            Repeat each probe.
@@ -246,7 +274,7 @@ Options:
   --sound               Ring the terminal bell for filtered, denial, or error verdicts.
   --no-stream           Use non-streaming responses.
   --headless            Run without OpenTUI, useful for smoke tests.
-  --output PATH         Result file. Default: results/openrouter-tui-<time>.jsonl.
+  --output PATH         Result file. Default: results/openchina-tui-<time>.jsonl.
   --format jsonl|md     Output format. Default: jsonl.
   --mock                Use deterministic mock responses instead of OpenRouter.
 `);
@@ -370,7 +398,7 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
-async function callOpenRouter(
+async function callChatCompletions(
   options: Options,
   model: string,
   prompt: string,
@@ -383,8 +411,10 @@ async function callOpenRouter(
     Authorization: `Bearer ${apiKey}`,
     "Content-Type": "application/json",
   };
-  if (options.referer) headers["HTTP-Referer"] = options.referer;
-  if (options.title) headers["X-Title"] = options.title;
+  if (options.provider === "openrouter") {
+    if (options.referer) headers["HTTP-Referer"] = options.referer;
+    if (options.title) headers["X-Title"] = options.title;
+  }
 
   const messages = [];
   if (options.system) messages.push({ role: "system", content: options.system });
@@ -447,6 +477,73 @@ async function callOpenRouter(
   return fullText;
 }
 
+async function callOllama(
+  options: Options,
+  model: string,
+  prompt: string,
+  onDelta: (delta: string) => void,
+) {
+  const messages = [];
+  if (options.system) messages.push({ role: "system", content: options.system });
+  messages.push({ role: "user", content: prompt });
+
+  const body = {
+    model,
+    messages,
+    stream: !options.noStream,
+    options: {
+      temperature: options.temperature,
+      num_predict: options.maxTokens,
+    },
+  };
+
+  const response = await fetchWithTimeout(`${options.ollamaUrl.replace(/\/$/, "")}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }, options.timeoutMs);
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+  }
+
+  if (options.noStream) {
+    const data = await response.json();
+    return contentToText(data?.message?.content ?? data?.response ?? "");
+  }
+
+  if (!response.body) throw new Error("Ollama streaming response did not include a body");
+
+  const decoder = new TextDecoder();
+  const reader = response.body.getReader();
+  let buffer = "";
+  let fullText = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const data = JSON.parse(trimmed);
+        const delta = contentToText(data?.message?.content ?? data?.response ?? "");
+        if (delta) {
+          fullText += delta;
+          onDelta(delta);
+        }
+      } catch {
+        // Keep reading if a partial JSON line slips through.
+      }
+    }
+  }
+
+  return fullText;
+}
+
 function mockStyle(model: string) {
   const lower = model.toLowerCase();
   if (lower.includes("filter")) return "filtered";
@@ -469,6 +566,12 @@ async function callMock(model: string, prompt: string, onDelta: (delta: string) 
     onDelta(chunk);
   }
   return response;
+}
+
+async function callModel(options: Options, model: string, prompt: string, onDelta: (delta: string) => void) {
+  if (options.provider === "mock") return await callMock(model, prompt, onDelta, options.delayMs);
+  if (options.provider === "ollama") return await callOllama(options, model, prompt, onDelta);
+  return await callChatCompletions(options, model, prompt, onDelta);
 }
 
 function buildRecord(
@@ -494,7 +597,7 @@ function buildRecord(
 
   return {
     timestamp_utc: new Date().toISOString(),
-    provider: options.mock ? "mock" : "openrouter",
+    provider: options.provider,
     model,
     probe_id: probe.id,
     probe_language: probe.language ?? "en",
@@ -607,6 +710,14 @@ function truncate(value: string, width: number) {
   return `${clean.slice(0, Math.max(0, width - 3))}...`;
 }
 
+function providerLabel(options: Options) {
+  if (options.provider === "openrouter") return "OpenRouter";
+  if (options.provider === "openai" && !options.baseUrlProvided && options.baseUrl.includes("api.openai.com")) return "OpenAI API";
+  if (options.provider === "openai") return "OpenAI-compatible";
+  if (options.provider === "ollama") return "Ollama";
+  return "Mock";
+}
+
 function renderDashboard(options: Options, states: Map<string, ModelState>, jobsDone: number, jobsTotal: number) {
   const ranked = [...states.values()].sort((a, b) => {
     const qualityDiff = modelQuality(b) - modelQuality(a);
@@ -616,7 +727,7 @@ function renderDashboard(options: Options, states: Map<string, ModelState>, jobs
   const lines = [];
   lines.push(...bannerLines(options.banner));
   if (options.banner !== "off") lines.push("");
-  lines.push(`OpenRouter June 4 filter audit | ${jobsDone}/${jobsTotal} probes complete | Ctrl+C to stop`);
+  lines.push(`${providerLabel(options)} June 4 filter audit | ${jobsDone}/${jobsTotal} probes complete | Ctrl+C to stop`);
   lines.push(flagLegend(options.flagMode));
   lines.push("");
   lines.push("RK  FLAG   MODEL                QLT  CLEAR    FACT  DONE   VERDICTS");
@@ -659,7 +770,7 @@ function writeMarkdown(path: string, records: RecordRow[]) {
     return acc;
   }, {});
   const lines = [
-    "# OpenRouter Live Ranker Report",
+    "# OpenChina Live Ranker Report",
     "",
     `Generated: ${new Date().toISOString()}`,
     "",
@@ -730,9 +841,7 @@ async function runJobs(
           state.liveText = `${state.liveText}${delta}`.slice(-220);
           render();
         };
-        response = options.mock
-          ? await callMock(job.model, job.probe.prompt, onDelta, options.delayMs)
-          : await callOpenRouter(options, job.model, job.probe.prompt, onDelta);
+        response = await callModel(options, job.model, job.probe.prompt, onDelta);
       } catch (caught) {
         error = caught instanceof Error ? caught.message : String(caught);
       }
@@ -820,10 +929,10 @@ async function main() {
     usage();
     return;
   }
-  if (!options.mock && options.models.length === 0) {
-    throw new Error("Add at least one OpenRouter model with --model or --models");
+  if (options.provider !== "mock" && options.models.length === 0) {
+    throw new Error(`Add at least one ${providerLabel(options)} model with --model or --models`);
   }
-  if (options.mock && options.models.length === 0) {
+  if (options.provider === "mock" && options.models.length === 0) {
     options.models = ["demo/substantive", "demo/filtered", "demo/denial"];
   }
 
