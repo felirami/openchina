@@ -1,0 +1,51 @@
+{
+  "name": "openchina",
+  "version": "0.1.0",
+  "description": "OpenTUI terminal audit for LLM filtering around June 4, 1989 and CCP-sensitive China prompts.",
+  "type": "module",
+  "bin": {
+    "openchina": "./bin/openchina"
+  },
+  "files": [
+    "bin",
+    "opentui_ranker.ts",
+    "prompts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "openchina": "bun ./bin/openchina",
+    "install:local": "bun link",
+    "tui": "bun run opentui_ranker.ts",
+    "tui:mock": "bun run opentui_ranker.ts --mock --models demo/substantive,demo/filtered,demo/denial --max-probes 4",
+    "test": "python3 -m unittest discover -s tests && bun ./bin/openchina mock --headless --max-probes 1 --output results/npm-smoke.jsonl"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/felirami/openchina.git"
+  },
+  "keywords": [
+    "opentui",
+    "openrouter",
+    "llm",
+    "audit",
+    "censorship",
+    "tiananmen",
+    "terminal"
+  ],
+  "author": "felirami",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/felirami/openchina/issues"
+  },
+  "homepage": "https://github.com/felirami/openchina#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.3.2"
+  }
+}

@@ -1,0 +1,251 @@
+#!/usr/bin/env bun
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmod } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const CONFIG_PATH = process.env.OPENCHINA_ENV_FILE ?? resolve(process.env.XDG_CONFIG_HOME ?? resolve(homedir(), ".config"), "openchina", "env");
+const RANKER_PATH = resolve(ROOT, "opentui_ranker.ts");
+const DEFAULT_MODELS = [
+  "openai/gpt-4.1-mini",
+  "anthropic/claude-sonnet-4",
+  "google/gemini-2.5-flash",
+  "deepseek/deepseek-chat",
+  "qwen/qwen3-32b",
+];
+
+type Parsed = {
+  command: "run" | "setup" | "mock" | "help";
+  passthrough: string[];
+  saveKey: boolean;
+  resetKey: boolean;
+};
+
+function printHelp() {
+  console.log(`openchina - OpenTUI LLM censorship/filter audit for June 4, 1989
+
+Usage:
+  openchina                  Prompt for an OpenRouter key if needed, then launch the live TUI.
+  openchina setup            Save or replace the local OpenRouter API key.
+  openchina mock             Launch the OpenTUI demo without API credits.
+  openchina --models A,B,C   Run a custom OpenRouter model roster.
+
+Examples:
+  openchina
+  openchina --sound --banner big
+  openchina --models openai/gpt-4.1-mini,deepseek/deepseek-chat,qwen/qwen3-32b
+  openchina mock --flag-mode unicode
+
+Key storage:
+  OPENROUTER_API_KEY in your shell always wins.
+  Otherwise openchina can save the key to ${CONFIG_PATH}.
+  Set OPENCHINA_ENV_FILE to override that path.
+
+Common options passed through to the OpenTUI runner:
+  --model NAME       Add one model. Repeatable.
+  --models A,B,C     Add comma-separated models.
+  --max-probes N     Limit the test prompt count. Default: 4.
+  --concurrency N    Parallel calls. Default: 3.
+  --banner MODE      off, compact, or big. Default: compact.
+  --flag-mode MODE   off, ascii, or unicode. Default: ascii.
+  --sound            Ring terminal bell on filtered, denial, or error verdicts.
+  --format jsonl|md  Result format. Default: md.
+  --output PATH      Result file path.
+
+More:
+  openchina --runner-help
+`);
+}
+
+function parseArgs(argv: string[]): Parsed {
+  const passthrough: string[] = [];
+  let command: Parsed["command"] = "run";
+  let saveKey = true;
+  let resetKey = false;
+
+  for (const arg of argv) {
+    if (arg === "setup") command = "setup";
+    else if (arg === "mock") command = "mock";
+    else if (arg === "--help" || arg === "-h") command = "help";
+    else if (arg === "--runner-help") passthrough.push("--help");
+    else if (arg === "--no-save-key") saveKey = false;
+    else if (arg === "--reset-key") resetKey = true;
+    else passthrough.push(arg);
+  }
+
+  return { command, passthrough, saveKey, resetKey };
+}
+
+function readSavedKey() {
+  if (!existsSync(CONFIG_PATH)) return "";
+  const body = readFileSync(CONFIG_PATH, "utf8");
+  const match = body.match(/^OPENROUTER_API_KEY=(.+)$/m);
+  return match?.[1]?.trim() ?? "";
+}
+
+async function askHidden(question: string) {
+  const stdin = process.stdin;
+  const stdout = process.stdout;
+  if (!stdin.isTTY) {
+    stdout.write(question);
+    const chunks: Buffer[] = [];
+    for await (const chunk of stdin) chunks.push(Buffer.from(chunk));
+    return Buffer.concat(chunks).toString("utf8").split(/\r?\n/, 1)[0]?.trim() ?? "";
+  }
+
+  stdin.setRawMode(true);
+  stdin.resume();
+  stdout.write(question);
+
+  let value = "";
+  return await new Promise<string>((resolveValue) => {
+    const onData = (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      for (const char of text) {
+        if (char === "\r" || char === "\n") {
+          stdin.off("data", onData);
+          stdin.setRawMode(false);
+          stdout.write("\n");
+          resolveValue(value.trim());
+          return;
+        }
+        if (char === "\u0003") {
+          stdin.off("data", onData);
+          stdin.setRawMode(false);
+          stdout.write("\n");
+          process.exit(130);
+        }
+        if (char === "\b" || char === "\u007f") {
+          value = value.slice(0, -1);
+          continue;
+        }
+        value += char;
+      }
+    };
+    stdin.on("data", onData);
+  });
+}
+
+async function askVisible(question: string) {
+  const stdin = process.stdin;
+  const stdout = process.stdout;
+  stdout.write(question);
+  let value = "";
+  for await (const chunk of stdin) {
+    value += chunk.toString("utf8");
+    if (value.includes("\n")) break;
+  }
+  return value.trim();
+}
+
+async function saveKey(key: string) {
+  mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+  writeFileSync(CONFIG_PATH, `OPENROUTER_API_KEY=${key}\n`, "utf8");
+  await chmod(CONFIG_PATH, 0o600);
+}
+
+async function ensureApiKey(saveByDefault: boolean) {
+  if (process.env.OPENROUTER_API_KEY) return process.env.OPENROUTER_API_KEY;
+
+  const saved = readSavedKey();
+  if (saved) {
+    process.env.OPENROUTER_API_KEY = saved;
+    return saved;
+  }
+
+  const key = await askHidden("OpenRouter API key: ");
+  if (!key) throw new Error("No OpenRouter API key entered.");
+
+  if (saveByDefault) {
+    const answer = await askVisible(`Save key locally to ${CONFIG_PATH}? [Y/n] `);
+    if (!answer || answer.toLowerCase().startsWith("y")) {
+      await saveKey(key);
+      console.log("Saved key locally with file mode 600.");
+    }
+  }
+
+  process.env.OPENROUTER_API_KEY = key;
+  return key;
+}
+
+function hasAnyModelArg(args: string[]) {
+  return args.some((arg) => arg === "--model" || arg.startsWith("--model=") || arg === "--models" || arg.startsWith("--models="));
+}
+
+function hasOption(args: string[], name: string) {
+  return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
+}
+
+function defaultedArgs(args: string[]) {
+  const result = [...args];
+  if (!hasAnyModelArg(result)) result.push("--models", DEFAULT_MODELS.join(","));
+  if (!hasOption(result, "--max-probes")) result.push("--max-probes", "4");
+  if (!hasOption(result, "--concurrency")) result.push("--concurrency", "3");
+  if (!hasOption(result, "--format")) result.push("--format", "md");
+  if (!hasOption(result, "--banner")) result.push("--banner", "compact");
+  if (!hasOption(result, "--flag-mode")) result.push("--flag-mode", "ascii");
+  return result;
+}
+
+async function runRanker(args: string[], env: NodeJS.ProcessEnv) {
+  return await new Promise<number>((resolveCode) => {
+    const child = spawn("bun", ["run", RANKER_PATH, ...args], {
+      cwd: ROOT,
+      env,
+      stdio: "inherit",
+    });
+    child.on("exit", (code) => resolveCode(code ?? 0));
+    child.on("error", (error) => {
+      console.error(error.message);
+      resolveCode(1);
+    });
+  });
+}
+
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+
+  if (parsed.command === "help") {
+    printHelp();
+    return;
+  }
+
+  if (parsed.resetKey && existsSync(CONFIG_PATH)) {
+    unlinkSync(CONFIG_PATH);
+    console.log(`Removed ${CONFIG_PATH}`);
+  }
+
+  if (parsed.passthrough.includes("--help")) {
+    const code = await runRanker(["--help"], process.env);
+    process.exitCode = code;
+    return;
+  }
+
+  if (parsed.command === "setup") {
+    const key = await askHidden("OpenRouter API key: ");
+    if (!key) throw new Error("No OpenRouter API key entered.");
+    await saveKey(key);
+    console.log(`Saved ${CONFIG_PATH}`);
+    return;
+  }
+
+  if (parsed.command === "mock") {
+    const args = ["--mock", ...parsed.passthrough];
+    const code = await runRanker(args, process.env);
+    process.exitCode = code;
+    return;
+  }
+
+  await ensureApiKey(parsed.saveKey);
+  const args = defaultedArgs(parsed.passthrough);
+  const code = await runRanker(args, process.env);
+  process.exitCode = code;
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});
