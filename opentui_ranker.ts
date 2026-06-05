@@ -831,9 +831,9 @@ async function main() {
   if (probes.length === 0) throw new Error("No probes selected");
 
   const jobs: Job[] = [];
-  for (const model of options.models) {
-    for (let repeatIndex = 0; repeatIndex < options.repeat; repeatIndex += 1) {
-      for (const probe of probes) jobs.push({ model, probe, repeatIndex });
+  for (let repeatIndex = 0; repeatIndex < options.repeat; repeatIndex += 1) {
+    for (const probe of probes) {
+      for (const model of options.models) jobs.push({ model, probe, repeatIndex });
     }
   }
 

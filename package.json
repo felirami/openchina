@@ -1,6 +1,6 @@
 {
   "name": "openchina",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenTUI terminal audit for LLM filtering around June 4, 1989 and CCP-sensitive China prompts.",
   "type": "module",
   "bin": {
