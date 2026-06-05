@@ -1,8 +1,13 @@
-# June 4 LLM Filter Audit
+# OpenChina
+
+[![npm version](https://img.shields.io/npm/v/openchina.svg)](https://www.npmjs.com/package/openchina)
+[![GitHub repo](https://img.shields.io/badge/github-felirami%2Fopenchina-blue)](https://github.com/felirami/openchina)
 
 Small CLI harness for testing whether an LLM refuses, evades, denies, or gives a substantive factual answer about the June 4, 1989 Tiananmen crackdown.
 
 The tool detects response behavior. It does not prove why the behavior happened or who caused it.
+
+NPM: [openchina](https://www.npmjs.com/package/openchina)
 
 ## Quick Start
 
@@ -55,12 +60,18 @@ python3 llm_filter_audit.py \
 
 ## Live OpenTUI Ranking
 
-Install from npm once published:
+Install from npm:
 
 ```bash
 npm install -g openchina
 openchina setup
 openchina
+```
+
+Or try it without installing globally:
+
+```bash
+npx openchina mock
 ```
 
 OpenChina is a Bun-powered terminal app. Install Bun first if `openchina` cannot find it:
